@@ -1,0 +1,8 @@
+build/
+third_party/libpd/libs/
+third_party/libpd/objects/
+*.o
+*.a
+*.so
+compile_commands.json
+.cache/
