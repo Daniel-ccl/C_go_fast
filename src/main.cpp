@@ -1,30 +1,76 @@
 #include <jack/jack.h>
 #include <z_libpd.h>
+#include <sys/mman.h>
+#include <cerrno>
 #include <cstdio>
-#include <vector>
+#include <cstring>
+#include <thread>
+#include <chrono>
+#include "param_store.h"
+
+constexpr size_t PD_BLOCK = 64;
+constexpr size_t RING_CAPACITY = 1 << 14;
+
+struct RingBuffer {
+    std::array<float, RING_CAPACITY> left{};
+    std::array<float, RING_CAPACITY> right{};
+    size_t write_pos = 0;
+    size_t read_pos = 0;
+    size_t available = 0;
+
+    void push_block(const float *interleaved, size_t n) {
+        for (size_t i = 0; i < n; i++) {
+            left[write_pos] = interleaved[i * 2];
+            right[write_pos] = interleaved[i * 2 + 1];
+            write_pos = (write_pos + 1) % RING_CAPACITY;
+        }
+        available += n;
+    }
+
+    void pop(float *out_left, float *out_right, size_t n) {
+        for (size_t i = 0; i < n; i++) {
+            out_left[i] = left[read_pos];
+            out_right[i] = right[read_pos];
+            read_pos = (read_pos + 1) % RING_CAPACITY;
+        }
+        available -= n;
+    }
+};
 
 static jack_port_t *out_left = nullptr;
 static jack_port_t *out_right = nullptr;
+static RingBuffer ring;
 
 static int process(jack_nframes_t nframes, void *arg) {
-    if (nframes % 64 != 0) return 0;
+    static float scratch[PD_BLOCK * 2];
+    static float last_freq = 440.0f;
 
-    static std::vector<float> interleaved;
-    interleaved.resize(nframes * 2);
-
-    libpd_process_float(nframes / 64, nullptr, interleaved.data());
-
-    float *left  = (float *)jack_port_get_buffer(out_left, nframes);
-    float *right = (float *)jack_port_get_buffer(out_right, nframes);
-
-    for (jack_nframes_t i = 0; i < nframes; i++) {
-        left[i]  = interleaved[i * 2];
-        right[i] = interleaved[i * 2 + 1];
+    float current_freq = ParamStore::instance().get(ParamID::Frequency);
+    if (current_freq != last_freq) {
+        libpd_float("freq", current_freq);
+        last_freq = current_freq;
     }
+
+    while (ring.available < nframes) {
+        int err = libpd_process_float(1, nullptr, scratch);
+        if (err != 0) {
+            fprintf(stderr, "libpd_process_float failed: %d\n", err);
+            return 0;
+        }
+        ring.push_block(scratch, PD_BLOCK);
+    }
+
+    float *left_buf = (float *)jack_port_get_buffer(out_left, nframes);
+    float *right_buf = (float *)jack_port_get_buffer(out_right, nframes);
+    ring.pop(left_buf, right_buf, nframes);
     return 0;
 }
 
 int main() {
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+        fprintf(stderr, "mlockall failed: %s (continuing without memory locking)\n", strerror(errno));
+    }
+
     jack_client_t *client = jack_client_open("cgofast_poc", JackNullOption, nullptr);
     if (!client) { fprintf(stderr, "could not connect to jack server\n"); return 1; }
 
@@ -52,6 +98,12 @@ int main() {
         if (ports[1]) jack_connect(client, jack_port_name(out_right), ports[1]);
         jack_free(ports);
     }
+
+    std::thread test_thread([]() {
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        ParamStore::instance().set(ParamID::Frequency, 880.0f);
+    });
+    test_thread.detach();
 
     printf("running - press enter to quit\n");
     getchar();
