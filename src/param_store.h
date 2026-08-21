@@ -1,32 +1,55 @@
 #pragma once
+
 #include <array>
 #include <atomic>
 #include <cstddef>
 
-enum class ParamID {
+enum class ParamID : std::size_t {
     Frequency,
     Count
 };
 
-class ParamStore {
+class ParamStore final {
 public:
-    static ParamStore& instance() {
-        static ParamStore store;
-        return store;
+    static ParamStore& instance() noexcept {
+        static ParamStore almacen;
+        return almacen;
     }
 
-    void set(ParamID id, float value) {
-        values_[static_cast<size_t>(id)].store(value, std::memory_order_relaxed);
+    ParamStore(const ParamStore&) = delete;
+    ParamStore& operator=(const ParamStore&) = delete;
+
+    void set(const ParamID id, const float valor) noexcept {
+        valores_[indice(id)].store(
+            valor,
+            std::memory_order_relaxed
+        );
     }
 
-    float get(ParamID id) const {
-        return values_[static_cast<size_t>(id)].load(std::memory_order_relaxed);
+    [[nodiscard]] float get(const ParamID id) const noexcept {
+        return valores_[indice(id)].load(
+            std::memory_order_relaxed
+        );
     }
 
 private:
-    ParamStore() {
-        values_[static_cast<size_t>(ParamID::Frequency)].store(440.0f, std::memory_order_relaxed);
+    static constexpr std::size_t CANTIDAD_PARAMETROS =
+        static_cast<std::size_t>(ParamID::Count);
+
+    static constexpr std::size_t indice(const ParamID id) noexcept {
+        return static_cast<std::size_t>(id);
     }
 
-    std::array<std::atomic<float>, static_cast<size_t>(ParamID::Count)> values_;
+    ParamStore() noexcept {
+        for (auto& valor : valores_) {
+            valor.store(0.0f, std::memory_order_relaxed);
+        }
+
+        valores_[indice(ParamID::Frequency)].store(
+            440.0f,
+            std::memory_order_relaxed
+        );
+    }
+
+    std::array<std::atomic<float>, CANTIDAD_PARAMETROS> valores_{};
 };
